@@ -7,12 +7,16 @@
 //
 
 import UIKit
+import Alamofire
 
 class PhotoBrowserCollectionViewController: UICollectionViewController, UICollectionViewDelegateFlowLayout {
   
   var photos = Set<PhotoInfo>()
   
+  private let imageCache = NSCache<NSString, UIImage>()
   private let refreshControl = UIRefreshControl()
+  private var populatingPhotos = false
+  private var currentPage = 1
   
   private let PhotoBrowserCellIdentifier = "PhotoBrowserCell"
   private let PhotoBrowserFooterViewIdentifier = "PhotoBrowserFooterView"
@@ -23,6 +27,8 @@ class PhotoBrowserCollectionViewController: UICollectionViewController, UICollec
     super.viewDidLoad()
     
     setupView()
+    
+    populatePhotos()
   }
   
   override func didReceiveMemoryWarning() {
@@ -37,6 +43,23 @@ class PhotoBrowserCollectionViewController: UICollectionViewController, UICollec
   
   override func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
     guard let cell = collectionView.dequeueReusableCell(withReuseIdentifier: PhotoBrowserCellIdentifier, for: indexPath) as? PhotoBrowserCollectionViewCell else { return UICollectionViewCell() }
+    
+    let imageURL = photos[photos.index(photos.startIndex, offsetBy: indexPath.item)].url
+
+    cell.request?.cancel()
+    
+    if let image = imageCache.object(forKey: imageURL as NSString) {
+      cell.imageView.image = image
+    } else {
+      cell.imageView.image = nil
+      
+      cell.request = Alamofire.request(imageURL, method: .get).responseImage {
+        response in
+        guard let image = response.result.value, response.result.error == nil else { return }
+        self.imageCache.setObject(image, forKey: response.request!.url!.absoluteString as NSString)
+        cell.imageView.image = image
+      }
+    }
     
     return cell
   }
@@ -85,13 +108,68 @@ class PhotoBrowserCollectionViewController: UICollectionViewController, UICollec
     }
   }
   
-  private dynamic func handleRefresh() {
+  // MARK: ScrollView Delegate
+  override func scrollViewDidScroll(_ scrollView: UIScrollView) {
+    if scrollView.contentOffset.y + view.frame.height > scrollView.contentSize.height * 0.8 {
+      populatePhotos()
+    }
+  }
+  
+  private func populatePhotos() {
+    if populatingPhotos { return }
     
+    populatingPhotos = true
+    
+    Alamofire.request(Five100px.Router.popularPhotos(currentPage)).responseJSON {
+      response in
+      guard let JSON = response.result.value, response.result.error == nil else {
+        self.populatingPhotos = false
+        return
+      }
+      
+      DispatchQueue.global(qos: .userInitiated).async {
+        guard let photoJsons = (JSON as AnyObject).value(forKey: "photos") as? [[String: Any]] else { return }
+        
+        let lastItemCount = self.photos.count
+        
+        photoJsons.forEach {
+          guard let nsfw = $0["nsfw"] as? Bool,
+            let id = $0["id"] as? Int,
+            let url = $0["image_url"] as? String,
+            nsfw == false else { return }
+          self.photos.insert(PhotoInfo(id: id, url: url))
+        }
+        
+        let indexPaths = (lastItemCount..<self.photos.count).map { IndexPath(item: $0, section: 0) }
+        
+        DispatchQueue.main.async {
+          self.collectionView?.insertItems(at: indexPaths)
+        }
+        
+        self.currentPage += 1
+      }
+      
+      self.populatingPhotos = false
+    }
+  }
+  
+  private dynamic func handleRefresh() {
+    refreshControl.beginRefreshing()
+    
+    photos.removeAll()
+    currentPage = 1
+    
+    collectionView?.reloadData()
+    
+    refreshControl.endRefreshing()
+    
+    populatePhotos()
   }
 }
 
-class PhotoBrowserCollectionViewCell: UICollectionViewCell {
+fileprivate class PhotoBrowserCollectionViewCell: UICollectionViewCell {
   fileprivate let imageView = UIImageView()
+  fileprivate var request: Request?
   
   required init?(coder aDecoder: NSCoder) {
     super.init(coder: aDecoder)
@@ -107,7 +185,7 @@ class PhotoBrowserCollectionViewCell: UICollectionViewCell {
   }
 }
 
-class PhotoBrowserCollectionViewLoadingCell: UICollectionReusableView {
+fileprivate class PhotoBrowserCollectionViewLoadingCell: UICollectionReusableView {
   fileprivate let spinner = UIActivityIndicatorView(activityIndicatorStyle: .whiteLarge)
   
   required init?(coder aDecoder: NSCoder) {
